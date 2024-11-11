@@ -1,0 +1,156 @@
+/*
+  Rui Santos
+  Complete project details at https://RandomNerdTutorials.com/esp32-web-server-microsd-card/
+  
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files.
+  
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+*/
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include "FS.h"
+#include "SD.h"
+#include "SPI.h"
+
+#include <ESP32Time.h>
+ #include <dirent.h>
+#include <stdio.h>
+
+ESP32Time esp32rtc;
+// Replace with your network credentials
+const char* ssid = "blah";
+const char* password = "blahblah";
+
+// Esp32 SoftAP
+const char* ap_ssid = "CurrentShunt";
+const char* ap_password = "yellowwhitered";
+
+// Create AsyncWebServer object on port 80
+AsyncWebServer server(80);
+
+AsyncWebSocket ws("/ws");
+
+File dataRoot;
+
+void initSDCard(){
+  if(!SD.begin()){
+    Serial.println("Card Mount Failed");
+    return;
+  }
+  uint8_t cardType = SD.cardType();
+
+  if(cardType == CARD_NONE){
+    Serial.println("No SD card attached");
+    return;
+  }
+
+  Serial.print("SD Card Type: ");
+  if(cardType == CARD_MMC){
+    Serial.println("MMC");
+  } else if(cardType == CARD_SD){
+    Serial.println("SDSC");
+  } else if(cardType == CARD_SDHC){
+    Serial.println("SDHC");
+  } else {
+    Serial.println("UNKNOWN");
+  }
+  uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+  Serial.printf("SD Card Size: %lluMB\n", cardSize);
+}
+
+void initSoftAP() {
+    Serial.println("\n[*] Creating AP");
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(ap_ssid, password);
+    Serial.print("[+] AP Created with IP Gateway ");
+    Serial.println(WiFi.softAPIP());
+}
+
+void initWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi ..");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print('.');
+    delay(1000);
+  }
+  Serial.println(WiFi.localIP());
+}
+
+void onEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventType type, void * arg, uint8_t *data, size_t len){
+  //Handle WebSocket event
+}
+
+void setup() {
+  Serial.begin(115200);
+  initWiFi();
+  // initSoftAP();
+  initSDCard();
+
+
+
+  // attach AsyncWebSocket
+  ws.onEvent(onEvent);
+  server.addHandler(&ws);
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send(SD, "/index.html", "text/html");
+  });
+  server.on("^\\/sensor\\/([0-9]+)$", HTTP_GET, [](AsyncWebServerRequest *request){
+    String sensorId = request->pathArg(0);
+
+    AsyncResponseStream *response = request->beginResponseStream("text/html");
+    response->addHeader("Content","ESP Async Web Server");
+    response->addHeader("Content-Type","application/json");
+    response->print("{\"sensorId\":\"");
+    response->print(sensorId);
+    response->print("\"}");
+    request->send(response);
+  });
+  server.on("/data/list-files", HTTP_GET, [](AsyncWebServerRequest *request){
+    AsyncResponseStream *response = request->beginResponseStream("text/html");
+    response->addHeader("Content","ESP Async Web Server");
+    response->addHeader("Content-Type","application/json");
+
+    // List files on the SD card
+    
+    DIR *dir;
+    struct dirent *entry;
+
+    dir = opendir("/sd/data");
+    if (!dir) {
+        printf("Failed to open directory %s\n", "/sd/data");
+        return;
+    }
+    response->print("[\".\", \"..\"");
+    while ((entry = readdir(dir)) != NULL) {
+        response->printf(",\n\"%s\"", entry->d_name);
+    }
+    response->print("]");
+
+    closedir(dir);
+
+    request->send(response);
+  });
+
+  server.serveStatic("/data", SD, "/www");
+
+  server.begin();
+}
+
+String getESP32RTCISO8601Timestamp() {
+  return esp32rtc.getTime("%Y-%m-%dT%H:%M:%S");
+}
+
+void loop() {
+  // Get the current time from the ESP32 RTC
+  String timestamp = getESP32RTCISO8601Timestamp();
+  ws.printfAll("{\"type\": \"LOG_MESSAGE\", \"data\": { \"message\": \"Hello from ESP32 Server! The current time is: %s\" } }", timestamp.c_str());
+
+  delay(1000);
+}

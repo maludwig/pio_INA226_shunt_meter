@@ -160,7 +160,7 @@ Written by Arnd <Arnd@Zanduino.Com> at https://www.github.com/SV-Zanshin
 #else
   #include "WProgram.h"
 #endif
-
+#include "Wire.h"
 #ifndef INA__Class_h
 /*! Guard code definition to prevent multiple includes */
 #define INA__Class_h
@@ -286,7 +286,7 @@ class INA_Class {
    * @brief   Forward definitions for the INA_Class
    */
  public:
-  INA_Class(uint8_t expectedDevices = 0);
+  INA_Class(uint8_t expectedDevices = 0, int sda = 21, int scl = 22, uint8_t bus_num = 0);
   ~INA_Class();
   uint8_t     begin(const uint16_t maxBusAmps, const uint32_t microOhmR,
                     const uint8_t deviceNumber = UINT8_MAX);
@@ -321,6 +321,12 @@ class INA_Class {
   #if defined(ESP32) || defined(ESP8266)
   uint16_t _EEPROM_size = 512;  ///< Default EEPROM reserved space for ESP32 and ESP8266
   #endif
+  TwoWire* _wire;
+  int sda_pin;
+  int scl_pin;
+  uint8_t    device_count{0};         ///< Total number of devices detected
+
+
  private:
   int16_t    readWord(const uint8_t addr, const uint8_t deviceAddress) const;
   int32_t    read3Bytes(const uint8_t addr, const uint8_t deviceAddress) const;
@@ -328,16 +334,11 @@ class INA_Class {
   void       readInafromEEPROM(const uint8_t deviceNumber);
   void       writeInatoEEPROM(const uint8_t deviceNumber);
   void       initDevice(const uint8_t deviceNumber);
-  uint8_t    _DeviceCount{0};         ///< Total number of devices detected
   uint8_t    _currentINA{UINT8_MAX};  ///< Stores current INA device number
   uint8_t    _expectedDevices{0};     ///< If 0 use EEPROM, otherwise use RAM for INA structures
   inaEEPROM* _DeviceArray;            ///< Pointer to dynamic array of devices if not using EEPROM
   inaEEPROM  inaEE;                   ///< INA device structure
   inaDet     ina;                     ///< INA device structure
-  #if defined(__AVR__) || defined(CORE_TEENSY) || defined(ESP32) || defined(ESP8266) || \
-      defined(__STM32F1__)
-  #else
   inaEEPROM _EEPROMEmulation[32];  ///< Actual array of up to 32 devices
-  #endif
 };  // of INA_Class definition
 #endif

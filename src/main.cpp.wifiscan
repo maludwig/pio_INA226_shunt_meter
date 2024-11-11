@@ -1,0 +1,64 @@
+#include <time.h>
+
+#include "FS.h"
+#include "SD.h"
+#include "SPI.h"
+
+#include "Arduino.h"
+#include <INA.h> // Zanshin INA Library
+#include <DS3231RTC.h>
+#include <Wire.h>
+#include <WireScanner.h>
+#include <vector>
+
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <dirent.h>
+#include <stdio.h>
+
+#include <string>
+#include <iomanip>
+#include <sstream>
+#include <cstring>
+
+#include "functions.h"
+#include <ESP32Time.h>
+#include <SimpleStats.h>
+
+void setup()
+{
+    Serial.begin(115200);
+    // Set ESP32 wifi to station mode
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    delay(100);
+    Serial.println("Setup done");
+}
+void loop()
+{
+    Serial.println("scan start");
+    // WiFi.scanNetworks will give total found wifi networks
+    int n = WiFi.scanNetworks();
+    Serial.println("scan done");
+    if (n == 0) {
+        Serial.println("no networks found");
+    } else {
+        Serial.print(n);
+        Serial.println(" networks found");
+        for (int i = 0; i < n; ++i) {
+            // Print SSID and signal strength
+            Serial.print(i + 1);
+            Serial.print(": ");
+            Serial.print(WiFi.SSID(i));
+            Serial.print(" (");
+            Serial.print(WiFi.RSSI(i));
+            Serial.print(")");
+            Serial.println((WiFi.encryptionType(i) == WIFI_AUTH_OPEN)?" ":"*");
+            delay(10);
+        }
+    }
+    Serial.println("");
+    // delay of 5 sec
+    delay(5000);
+}

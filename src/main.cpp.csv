@@ -1,0 +1,357 @@
+#include "FS.h"
+#include "SD.h"
+#include "SPI.h"
+
+#include "Arduino.h"
+#include <INA.h> // Zanshin INA Library
+#include <DS3231RTC.h>
+#include <Wire.h>
+#include <WireScanner.h>
+#include <vector>
+
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <dirent.h>
+#include <stdio.h>
+
+#include <string>
+#include <iomanip>
+#include <sstream>
+#include <cstring>
+
+#include "functions.h"
+#include <ESP32Time.h>
+#include <SimpleStats.h>
+
+const uint32_t SERIAL_SPEED{115200}; ///< Use fast serial speed
+
+const uint32_t SHUNT_MICRO_OHM{100}; ///< Shunt resistance in Micro-Ohm, e.g. 100000 is 0.1 Ohm
+
+const uint16_t MAXIMUM_AMPS{1}; ///< Max expected amps, clamped from 1A to a max of 1022A
+uint8_t devicesFound{0};        ///< Number of INAs found
+INA_Class* ina_a;                  ///< INA class instantiation to use EEPROM
+INA_Class* ina_b;                  ///< INA class instantiation to use EEPROM
+
+std::vector<INA_Class*> inaVector;
+
+DS3231RTC rtc;
+WireScanner ws;
+
+#define LED_PIN 27
+
+TwoWire* wire_a;
+TwoWire* wire_b;
+// #define WIRE_A_SDA 21
+// #define WIRE_A_SCL 22
+#define WIRE_A_SDA 33
+#define WIRE_A_SCL 32
+#define WIRE_B_SDA 21
+#define WIRE_B_SCL 22
+
+
+// 2.5 uV per LSB
+#define SHUNT_VOLTS_PER_LSB 0.0000025
+
+// 1.25 mV per LSB
+#define BUS_VOLTS_PER_LSB 0.00125
+
+ESP32Time esp32rtc;
+// Replace with your network credentials
+const char* ssid = "blah";
+const char* password = "blahblah";
+
+// Esp32 SoftAP
+const char* ap_ssid = "CurrentShunt";
+const char* ap_password = "yellowwhitered";
+
+// Create AsyncWebServer object on port 80
+AsyncWebServer server(80);
+
+AsyncWebSocket ws("/ws");
+
+ESP32Time esp32rtc;
+
+File log_file;
+
+struct ShuntStats {
+    SimpleStats busVoltageStats;
+    SimpleStats shuntVoltageStats;
+    int32_t lastShuntRawVoltage;
+    uint32_t lastBusRawVoltage;
+};
+
+ShuntStats shuntStatsArray[5];
+
+int sd_setup() {
+
+  if(!SD.begin(5)){
+    Serial.println("Card Mount Failed");
+    return -1;
+  }
+  uint8_t cardType = SD.cardType();
+
+  if(cardType == CARD_NONE){
+    Serial.println("No SD card attached");
+    return -2;
+  }
+
+  Serial.print("SD Card Type: ");
+  if(cardType == CARD_MMC){
+    Serial.println("MMC");
+  } else if(cardType == CARD_SD){
+    Serial.println("SDSC");
+  } else if(cardType == CARD_SDHC){
+    Serial.println("SDHC");
+  } else {
+    Serial.println("UNKNOWN");
+  }
+  return 0;
+}
+
+void initSoftAP() {
+    Serial.println("\n[*] Creating AP");
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(ap_ssid, password);
+    Serial.print("[+] AP Created with IP Gateway ");
+    Serial.println(WiFi.softAPIP());
+}
+
+void initWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi ..");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print('.');
+    delay(1000);
+  }
+  Serial.println(WiFi.localIP());
+}
+
+void writeRow(File file, String row) {
+  file.println(row);
+}
+
+void ina_setup() {
+
+  ina_a = new INA_Class(0, WIRE_A_SDA, WIRE_A_SCL, 0);
+  ina_b = new INA_Class(0, WIRE_B_SDA, WIRE_B_SCL, 1);
+  inaVector = {ina_a, ina_b};
+  // inaVector = {ina_a};
+
+  Serial.print("\n\nDisplay INA Readings V1.0.8\n");
+  Serial.print(" - Searching & Initializing INA devices\n");
+  for (INA_Class* ina : inaVector) {
+    Serial.print("   - Begin\n");
+    devicesFound = ina->begin(MAXIMUM_AMPS, SHUNT_MICRO_OHM); // Expected max Amp & shunt resistance
+    while (devicesFound == 0)
+    {
+      Serial.println(F("No INA device found, retrying in 10 seconds..."));
+      delay(10000);                                            // Wait 10 seconds before retrying
+      devicesFound = ina->begin(MAXIMUM_AMPS, SHUNT_MICRO_OHM); // Expected max Amp & shunt resistance
+    }                                                          // while no devices detected
+    Serial.print(F(" - Detected "));
+    Serial.print(devicesFound);
+    Serial.println(F(" INA devices on the I2C bus"));
+    ina->setBusConversion(8500);            // Maximum conversion time 8.244ms
+    ina->setShuntConversion(8500);          // Maximum conversion time 8.244ms
+    ina->setAveraging(16);                  // Average each reading n-times
+    ina->setMode(INA_MODE_CONTINUOUS_BOTH); // Bus/shunt measured continuously
+  }
+
+  Serial.print(F("Lp   Nr AdrPin Type   Bus         Shunt       Bus         Bus\n"));
+  Serial.print(F("==== == ====== ====== =========== =========== =========== ===========\n"));
+
+}
+
+
+
+/**
+ * @brief SETUP
+ * 
+ */
+void setup()
+{
+  Serial.begin(SERIAL_SPEED);
+  delay(1000);
+
+  // SD Card Setup
+  Serial.println("Initializing SD card...");
+  int sd_mounted = sd_setup();
+  while(sd_mounted != 0) {
+    Serial.println("FAILED: Waiting 10 seconds...");
+    delay(10000);
+    Serial.println("Reinitializing SD card...");
+    sd_mounted = sd_setup();
+  }
+
+  // Connect to a wifi hotspot
+  initWiFi();
+
+  // // Host an Access Point
+  // initSoftAP();
+
+  // initialize digital pin LED_PIN as an output.
+  pinMode(LED_PIN, OUTPUT);
+
+  // DS3231 Setup
+  Serial.println("Initializing DS3231...");
+  Wire.begin(WIRE_A_SDA, WIRE_A_SCL, INA_I2C_STANDARD_MODE);
+  // rtc.begin();
+  Serial.println("Setting time mode...");
+  rtc.set24HourMode();
+  // // Set the initial date and time
+  // rtc.setTimeDate(2023, 7, 13, 1, 18, 0);
+
+  // The the date and time at startup to set the internal ESP32 RTC
+  uint8_t second, minute, hour, dayOfWeek, dayOfMonth, month;
+  uint16_t year;
+  rtc.getTimeDate(&year, &month, &dayOfMonth, &hour, &minute, &second, &dayOfWeek);
+  sleep(1);
+  // Initialize the internal ESP32 RTC
+  esp32rtc.setTime(second,minute, hour, dayOfMonth, month, year);
+  Serial.println("Time set to: " + esp32rtc.getTime("%Y-%m-%dT%H:%M:%S"));
+  sleep(1);
+
+
+  // INA226 Setup
+  Serial.println("Initializing INA226...");
+  ina_setup();
+  sleep(1);
+
+  // Record start time
+  log_file = SD.open("/log.txt", FILE_WRITE);
+  String logMessage = "Started at: " + rtc.getTimestamp();
+  writeRow(log_file, logMessage);
+  sleep(1);
+}
+
+
+
+
+
+String getINAMeasurements(INA_Class* ina, uint8_t deviceIndex, ShuntStats stats) {
+
+  static char sprintfBuffer[100];                                       // Buffer to format output
+  static char busChar[20], shuntChar[20], busMAChar[20], busMWChar[20]; // Output buffers
+  int32_t shuntRawVoltage = ina->getShuntRaw(deviceIndex);
+  uint32_t busRawVoltage = ina->getBusRaw(deviceIndex);
+  float shuntVolts = SHUNT_VOLTS_PER_LSB * shuntRawVoltage;
+  float busVolts = BUS_VOLTS_PER_LSB * busRawVoltage;
+  float busAmps = shuntVolts * 10000.0;
+  float busWatts = busAmps * busVolts;
+  sprintf(sprintfBuffer, "%f,%f,%f,%f,", busVolts, shuntVolts, busAmps, busWatts);
+  
+  stats.busVoltageStats.add_measurement(busRawVoltage);
+  stats.shuntVoltageStats.add_measurement(shuntRawVoltage);
+  stats.lastBusRawVoltage = busRawVoltage;
+  stats.lastShuntRawVoltage = shuntRawVoltage;
+
+  String buffer = sprintfBuffer;
+  return buffer;
+}
+
+
+void getSimpleINAMeasurements(INA_Class* ina, uint8_t deviceIndex, ShuntStats& stats) {
+
+  int32_t shuntRawVoltage = ina->getShuntRaw(deviceIndex);
+  uint32_t busRawVoltage = ina->getBusRaw(deviceIndex);
+  stats.busVoltageStats.add_measurement(busRawVoltage);
+  stats.shuntVoltageStats.add_measurement(shuntRawVoltage);
+}
+
+String getINAMeasurementsForCSV(INA_Class* ina, uint8_t deviceIndex) {
+
+  static char sprintfBuffer[100];                                       // Buffer to format output
+  static char busChar[20], shuntChar[20], busMAChar[20], busMWChar[20]; // Output buffers
+  int32_t shuntRawVoltage = ina->getShuntRaw(deviceIndex);
+  uint32_t busRawVoltage = ina->getBusRaw(deviceIndex);
+  float shuntVolts = SHUNT_VOLTS_PER_LSB * shuntRawVoltage;
+  float busVolts = BUS_VOLTS_PER_LSB * busRawVoltage;
+  float busAmps = shuntVolts * 10000.0;
+  float busWatts = busAmps * busVolts;
+  sprintf(sprintfBuffer, "%f,%f,%f,%f,", busVolts, shuntVolts, busAmps, busWatts);
+  return String(sprintfBuffer);
+}
+
+void showINAMeasurements()
+{
+  int statsIdx = 0;
+  for (INA_Class* ina : inaVector) {
+    for (uint8_t i = 0; i < ina->device_count; i++) // Loop through all devices
+    {
+      statsIdx++;
+      getINAMeasurementsForCSV(ina, i);
+      String buffer = getINAMeasurements(ina, i, shuntStatsArray[statsIdx]);
+      Serial.print(buffer);
+      log_file.print(buffer);
+    } 
+  }
+}
+
+void showTime() {
+  Serial.println(rtc.getTimestamp());
+}
+
+String getESP32RTCFSSafeTimestamp() {
+  return esp32rtc.getTime("%Y%m%dT%H%M%S");
+}
+
+String getESP32RTCISO8601Timestamp() {
+  return esp32rtc.getTime("%Y-%m-%dT%H:%M:%S");
+}
+
+void loop() {
+  static uint16_t loopCounter = 0; // Count the number of iterations
+  static uint8_t ledPinLevel = HIGH;
+
+  static int lastMinute = 255;
+  static String timestampedLogFilePath;
+  int minute = esp32rtc.getMinute();
+  if (minute != lastMinute) {
+    lastMinute = minute;
+    log_file.close();
+
+    Serial.print("Minute: ");
+    Serial.println(minute);
+    String timestampedLogFilePath = "/" + getESP32RTCFSSafeTimestamp() + ".csv";
+    Serial.print("Log file path: ");
+    Serial.println(timestampedLogFilePath);
+    log_file = SD.open(timestampedLogFilePath, FILE_APPEND);
+    log_file.print("timestamp,");
+
+    int deviceIdx = 0;
+    for (INA_Class* ina : inaVector) {
+      for (uint8_t i = 0; i < ina->device_count; i++) {
+        deviceIdx++;
+        log_file.printf("busVolts_%d,shuntVolts_%d,busAmps_%d,busWatts_%d,", deviceIdx, deviceIdx, deviceIdx, deviceIdx);
+      } 
+    }
+    log_file.println("ok");
+  }
+
+  loopCounter++;
+  if (loopCounter % 2 == 0) {
+    if (ledPinLevel == HIGH) {
+      // Serial.println("Off");
+      ledPinLevel = LOW;
+    } else {
+      // Serial.println("On");
+      ledPinLevel = HIGH;
+    }
+  }
+  digitalWrite(LED_PIN, ledPinLevel); // turn the LED on (HIGH is the voltage level)
+
+  String timestamp = getESP32RTCISO8601Timestamp();
+  // Serial.println(timestamp);
+  Serial.print(timestamp + ",");
+  log_file.print(timestamp + ",");
+  showINAMeasurements();
+  Serial.println();
+  log_file.println();
+
+  // showTime();
+
+  // ws.scan_wire();
+  delay(500); // Wait 2 seconds before next reading
+} // method loop()
